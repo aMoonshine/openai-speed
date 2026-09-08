@@ -1,0 +1,22 @@
+{
+  "name": "openai-speed",
+  "version": "0.1.0",
+  "description": "OpenCode TUI plugin for OpenRouter model throughput",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test speed.test.js"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./tui": "./tui.js"
+  },
+  "dependencies": {
+    "@opentui/solid": "0.4.5",
+    "solid-js": "1.9.12"
+  },
+  "overrides": {
+    "@babel/core": "7.29.7"
+  }
+}
