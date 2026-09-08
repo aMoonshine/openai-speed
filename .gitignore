@@ -1,0 +1,7 @@
+node_modules/
+.omo/
+*.log
+.env
+.env.*
+!.env.example
+openrouter-speed.json
