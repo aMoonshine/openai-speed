@@ -10,7 +10,6 @@ const PROVIDER_COLUMN_WIDTH = 7;
 const PROVIDER_COLORS = ["#73aaa7", "#6f9878"];
 const PRO_MODEL_COLOR = "#e2a34e";
 const PRO_VALUE_COLORS = ["#8bcac2", "#91bd91"];
-const TITLE_COLOR = "#b06f83";
 const UPDATE_COLOR = "#a99bc4";
 
 const formatUpdatedTime = (timestamp) => {
@@ -20,9 +19,11 @@ const formatUpdatedTime = (timestamp) => {
     .join(":");
 };
 
-const providerHeader = (config) => {
+const updateLabel = (timestamp) => timestamp > 0 ? `upd ${formatUpdatedTime(timestamp)}` : "upd --";
+
+const providerHeader = (snapshot, config) => {
   const labels = config.providers.map((provider) => providerDisplayName(provider.label).padEnd(PROVIDER_COLUMN_WIDTH));
-  return `${" ".repeat(MODEL_COLUMN_WIDTH)}${labels.join("")}`.trimEnd();
+  return `${updateLabel(snapshot.updatedAt).padEnd(MODEL_COLUMN_WIDTH)}${labels.join("")}`.trimEnd();
 };
 
 const modelRowText = (result, config) => {
@@ -38,10 +39,9 @@ const modelRowText = (result, config) => {
 export const renderSnapshot = (snapshot, config) => {
   const body = snapshot.loading || snapshot.results.length === 0
     ? snapshot.loading ? "loading…" : "no models configured"
-    : [`upd ${formatUpdatedTime(snapshot.updatedAt)}`, ...snapshot.results.map((result) => modelRowText(result, config))].join("\n");
+    : snapshot.results.map((result) => modelRowText(result, config)).join("\n");
   return [
-    "OpenRouter speed",
-    providerHeader(config),
+    providerHeader(snapshot, config),
     body,
   ].join("\n");
 };
@@ -70,7 +70,6 @@ const renderRows = (solid, snapshot, config) => {
     });
     return row;
   });
-  rows.unshift(textNode(solid, `upd ${formatUpdatedTime(snapshot.updatedAt)}`, UPDATE_COLOR));
   return rows;
 };
 
@@ -80,14 +79,12 @@ const speedComponent = (solid, view, config) => {
     solid.setProp(box, "flexDirection", "column");
     solid.setProp(box, "paddingLeft", 1);
     solid.setProp(box, "paddingRight", 1);
-    const title = solid.createElement("text");
-    solid.setProp(title, "fg", TITLE_COLOR);
-    solid.insert(title, "OpenRouter speed");
-    solid.insert(box, title);
-
     const providers = solid.createElement("box");
     solid.setProp(providers, "flexDirection", "row");
-    solid.insert(providers, textNode(solid, " ".repeat(MODEL_COLUMN_WIDTH), "white"));
+    const updated = solid.createElement("text");
+    solid.setProp(updated, "fg", UPDATE_COLOR);
+    solid.insert(updated, () => updateLabel(view().updatedAt).padEnd(MODEL_COLUMN_WIDTH));
+    solid.insert(providers, updated);
     for (const [index, provider] of config.providers.entries()) {
       solid.insert(providers, textNode(solid, providerDisplayName(provider.label).padEnd(PROVIDER_COLUMN_WIDTH), PROVIDER_COLORS[index] ?? "white"));
     }
@@ -122,7 +119,8 @@ export const OpenRouterSpeedTuiPlugin = async (api) => {
     running = true;
     try {
       const modelIds = currentModelIds(sessionId);
-      setView({ loading: false, results: (await collectSpeed(modelIds, config.providers, config.percentile)).results, updatedAt: Date.now() });
+      const collection = await collectSpeed(modelIds, config.providers, config.percentile, config.pageDelayMs);
+      setView({ loading: false, results: collection.results, updatedAt: collection.updatedAt });
       api.renderer?.requestRender();
     } finally {
       running = false;
@@ -163,14 +161,14 @@ export const OpenRouterSpeedTuiPlugin = async (api) => {
   const disposeCommand = api.keymap?.registerLayer({
     commands: [{
       name: "openai-speed.refresh",
-      title: "OpenAI Speed",
-      description: "Refresh OpenRouter throughput",
-      category: "OpenRouter",
+      title: "Refresh speed",
+      description: "Refresh model throughput",
+      category: "Speed",
       namespace: "palette",
       slashName: "openai-speed",
       run: () => {
         if (activeSessionId) void refresh(activeSessionId);
-        api.ui?.toast({ title: "OpenAI Speed", message: "Throughput refresh requested", variant: "info" });
+        api.ui?.toast({ title: "Speed", message: "Throughput refresh requested", variant: "info" });
       },
     }],
   });

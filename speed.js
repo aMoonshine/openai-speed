@@ -15,9 +15,12 @@ const DEFAULT_MODELS = [
 ];
 const DEFAULT_PROVIDERS = [
   { label: "OpenAI", tag: "openai" },
-  { label: "OpenAI Fast", tag: "openai/fast" },
+  { label: "Fast", tag: "openai/fast" },
 ];
 const PERCENTILES = ["p50", "p75", "p90", "p99"];
+const DEFAULT_POLL_MS = 600000;
+const DEFAULT_PAGE_DELAY_MS = 1000;
+const lastSuccessfulProviders = new Map();
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -45,7 +48,7 @@ const parseProviders = (value) => {
 };
 
 const parseConfig = (value) => {
-  if (!isRecord(value)) return { models: DEFAULT_MODELS, providers: DEFAULT_PROVIDERS };
+  if (!isRecord(value)) return { models: DEFAULT_MODELS, providers: DEFAULT_PROVIDERS, percentile: "p50", pollMs: DEFAULT_POLL_MS, pageDelayMs: DEFAULT_PAGE_DELAY_MS };
   const models = Array.isArray(value.models)
     ? uniqueStrings(value.models.map(normalizeModelId))
     : DEFAULT_MODELS;
@@ -53,12 +56,17 @@ const parseConfig = (value) => {
   const pollMs =
     typeof value.pollMs === "number" && Number.isInteger(value.pollMs) && value.pollMs > 0
       ? value.pollMs
-      : 600000;
+      : DEFAULT_POLL_MS;
+  const pageDelayMs =
+    typeof value.pageDelayMs === "number" && Number.isInteger(value.pageDelayMs) && value.pageDelayMs >= 0
+      ? value.pageDelayMs
+      : DEFAULT_PAGE_DELAY_MS;
   return {
     models: models.length > 0 ? models : DEFAULT_MODELS,
     providers: parseProviders(value.providers),
     percentile,
     pollMs,
+    pageDelayMs,
   };
 };
 
@@ -117,6 +125,12 @@ const endpointMetrics = (endpoint, percentile) => {
   return throughput ?? metric(endpoint.throughput_last_30m, percentile);
 };
 
+const pageStatsMetric = (stats, percentile) => {
+  if (!isRecord(stats)) return undefined;
+  const candidate = stats[`${percentile}_throughput`];
+  return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined;
+};
+
 const modelPath = (modelId) => {
   const slash = modelId.indexOf("/");
   if (slash < 1 || slash === modelId.length - 1) return undefined;
@@ -125,17 +139,82 @@ const modelPath = (modelId) => {
   return `https://openrouter.ai/api/v1/models/${author}/${slug}/endpoints`;
 };
 
+const modelPagePath = (modelId) => {
+  const slash = modelId.indexOf("/");
+  if (slash < 1 || slash === modelId.length - 1) return undefined;
+  const author = encodeURIComponent(modelId.slice(0, slash));
+  const slug = encodeURIComponent(modelId.slice(slash + 1));
+  return `https://openrouter.ai/${author}/${slug}`;
+};
+
 const fetchJson = async (url, key) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    const headers = key ? { Authorization: `Bearer ${key}` } : {};
+    const headers = {
+      "Cache-Control": "no-cache",
+      ...(key ? { Authorization: `Bearer ${key}` } : {}),
+    };
     const response = await fetch(url, { headers, signal: controller.signal });
     if (!response.ok) throw new Error(`OpenRouter HTTP ${response.status}`);
     return await response.json();
   } finally {
     clearTimeout(timer);
   }
+};
+
+const fetchText = async (url) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "Accept": "text/html,application/xhtml+xml",
+        "Cache-Control": "no-cache",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) OpenRouterSpeed/0.1",
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`OpenRouter page HTTP ${response.status}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+export const parsePageThroughput = (html, providers, percentile) => {
+  const normalized = html.replaceAll('\\\"', '"');
+  const metrics = new Map();
+  const pattern = /"provider_slug"\s*:\s*"([^"]+)"[\s\S]{0,12000}?"stats"\s*:\s*\{([^}]*)\}/g;
+  let match;
+  while ((match = pattern.exec(normalized))) {
+    const stats = Object.fromEntries(
+      [...match[2].matchAll(/"(p(?:50|75|90|99)_throughput)"\s*:\s*(null|-?[0-9]+(?:\.[0-9]+)?)/g)].map((entry) => [
+        entry[1],
+        entry[2] === "null" ? null : Number(entry[2]),
+      ]),
+    );
+    const throughput = pageStatsMetric(stats, percentile);
+    if (throughput !== undefined && !metrics.has(match[1])) metrics.set(match[1], throughput);
+  }
+  const rows = [...normalized.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map((match) => match[1]);
+  const rowMetrics = new Map();
+  for (const row of rows) {
+    const name = row.match(/aria-label="Open\s+([^"]+?)\s+details"/i)?.[1];
+    const throughput = row.match(/>([0-9]+(?:\.[0-9]+)?)<span[^>]*>\s*tps<\/span>/i)?.[1];
+    if (name && throughput !== undefined) rowMetrics.set(name.replace(/\s+/g, " ").trim().toLowerCase(), Number(throughput));
+  }
+  return providers.map((provider) => ({
+    label: provider.label,
+    tag: provider.tag,
+    throughput: rowMetrics.get((provider.tag === "openai/fast" ? "OpenAI Fast" : provider.label).replace(/\s+/g, " ").trim().toLowerCase()) ?? metrics.get(provider.tag),
+  }));
+};
+
+const fetchPageThroughput = async (modelId, providers, percentile) => {
+  const url = modelPagePath(modelId);
+  if (!url) return [];
+  return parsePageThroughput(await fetchText(url + "?openrouter_speed=" + Date.now()), providers, percentile);
 };
 
 const providerView = (endpoint, provider, percentile) => {
@@ -148,27 +227,80 @@ const providerView = (endpoint, provider, percentile) => {
   };
 };
 
+const hasThroughput = (provider) => typeof provider?.throughput === "number" && Number.isFinite(provider.throughput);
+
+const rememberProviders = (modelId, providers) => {
+  const previous = lastSuccessfulProviders.get(modelId);
+  const merged = providers.map((provider, index) => ({
+    label: provider.label,
+    tag: provider.tag,
+    throughput: hasThroughput(provider) ? provider.throughput : previous?.[index]?.throughput,
+  }));
+  if (merged.some(hasThroughput)) lastSuccessfulProviders.set(modelId, merged);
+  return merged;
+};
+
 export const fetchModelSpeed = async (modelId, providers, percentile) => {
   const url = modelPath(modelId);
   if (!url) return { modelId, providers: [], error: "invalid model id" };
+
+  let pageProviders;
+  let pageError;
+  try {
+    pageProviders = await fetchPageThroughput(modelId, providers, percentile);
+    if (pageProviders.every(hasThroughput)) {
+      return { modelId, providers: rememberProviders(modelId, pageProviders) };
+    }
+  } catch (error) {
+    pageError = error instanceof Error ? error.message : "page request failed";
+  }
+
+  let apiProviders;
+  let apiError;
   try {
     const body = await fetchJson(url, await openRouterKey());
     const endpoints = isRecord(body) && isRecord(body.data) && Array.isArray(body.data.endpoints) ? body.data.endpoints : [];
-    return {
-      modelId,
-      providers: providers.map((provider) => endpoints.map((endpoint) => providerView(endpoint, provider, percentile)).find(Boolean) || {
-        label: provider.label,
-        tag: provider.tag,
-        throughput: undefined,
-      }),
-    };
+    apiProviders = providers.map((provider) => endpoints.map((endpoint) => providerView(endpoint, provider, percentile)).find(Boolean) || {
+      label: provider.label,
+      tag: provider.tag,
+      throughput: undefined,
+    });
   } catch (error) {
-    return { modelId, providers: [], error: error instanceof Error ? error.message : "request failed" };
+    apiError = error instanceof Error ? error.message : "request failed";
   }
+
+  const mergedProviders = providers.map((provider, index) => ({
+    label: provider.label,
+    tag: provider.tag,
+    throughput: pageProviders?.[index]?.throughput ?? apiProviders?.[index]?.throughput,
+  }));
+  if (mergedProviders.some(hasThroughput)) {
+    return { modelId, providers: rememberProviders(modelId, mergedProviders) };
+  }
+
+  if (lastSuccessfulProviders.has(modelId)) {
+    return { modelId, providers: rememberProviders(modelId, providers) };
+  }
+  if (apiProviders) return { modelId, providers: apiProviders };
+  return { modelId, providers: [], error: apiError ?? pageError };
 };
 
-export const collectSpeed = async (modelIds, providers, percentile) => {
-  const results = await Promise.all(modelIds.map((modelId) => fetchModelSpeed(modelId, providers, percentile)));
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+export const collectSpeed = async (modelIds, providers, percentile, pageDelayMs = DEFAULT_PAGE_DELAY_MS) => {
+  const results = [];
+  for (const [index, modelId] of modelIds.entries()) {
+    if (index > 0 && pageDelayMs > 0) await wait(pageDelayMs);
+    try {
+      results.push(await fetchModelSpeed(modelId, providers, percentile));
+    } catch (error) {
+      results.push({
+        modelId,
+        providers: providers.map((provider) => ({ label: provider.label, tag: provider.tag, throughput: undefined })),
+        error: error instanceof Error ? error.message : "request failed",
+      });
+    }
+  }
   return { results, updatedAt: Date.now() };
 };
 

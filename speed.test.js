@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fetchModelSpeed, formatThroughput, modelIdsFromSession } from "./speed.js";
+import { fetchModelSpeed, formatThroughput, modelIdsFromSession, parsePageThroughput } from "./speed.js";
 import { renderSnapshot } from "./tui.js";
 
 test("formats OpenRouter throughput", () => {
@@ -29,6 +29,33 @@ test("renders one throughput value per provider without latency", () => {
   assert.match(output, /5\.6-terra\s+41\s+54/);
   assert.match(output, /upd/);
   assert.doesNotMatch(output, /gpt-5\.6-terra|tok\/s|\/|p50|rolling|TTFT|latency/i);
+});
+
+test("parses throughput from the OpenRouter model page when endpoint metrics are empty", () => {
+  const html = String.raw`<script>\"provider_slug\":\"openai\",\"stats\":{\"p50_throughput\":41,\"p75_throughput\":65}}<script>\"provider_slug\":\"openai/fast\",\"stats\":{\"p50_throughput\":54}}</script>`;
+  assert.deepEqual(parsePageThroughput(html, [
+    { label: "OpenAI", tag: "openai" },
+    { label: "Fast", tag: "openai/fast" },
+  ], "p50").map((provider) => provider.throughput), [41, 54]);
+});
+
+test("uses exact provider rows for a Pro model", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/api/v1/")) {
+      return new Response(JSON.stringify({ data: { endpoints: [] } }));
+    }
+    return new Response("<tr><td><button aria-label=\"Open OpenAI details\"></button></td><td>110<span> tps</span></td></tr><tr><td><button aria-label=\"Open OpenAI Fast details\"></button></td><td>209<span> tps</span></td></tr>");
+  };
+  try {
+    const result = await fetchModelSpeed("openai/gpt-5.6-luna-pro", [
+      { label: "OpenAI", tag: "openai" },
+      { label: "Fast", tag: "openai/fast" },
+    ], "p50");
+    assert.deepEqual(result.providers.map((provider) => provider.throughput), [110, 209]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("reads exact provider tags from the supported endpoints response", async () => {

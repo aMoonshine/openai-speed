@@ -15,10 +15,11 @@
       "tag": "openai"
     },
     {
-      "label": "OpenAI Fast",
+      "label": "Fast",
       "tag": "openai/fast"
     }
   ],
   "percentile": "p50",
-  "pollMs": 600000
+  "pollMs": 600000,
+  "pageDelayMs": 1000
 }

@@ -2,14 +2,14 @@
 
 OpenCode sidebar plugin for OpenRouter's provider performance metrics.
 
-It uses the supported endpoint:
+It reads provider rows from each exact OpenRouter model page. The API endpoint remains a fallback when the page does not contain a complete set of values:
 
 ```text
-GET https://openrouter.ai/api/v1/models/{author}/{slug}/endpoints
+GET https://openrouter.ai/{author}/{slug}
 ```
 
-The sidebar is titled `OpenRouter speed` and displays the output throughput
-number for each configured provider in aligned columns. The default percentile is `p50`, meaning the median value
+The sidebar displays the output throughput number for each configured provider
+in aligned columns. The default percentile is `p50`, meaning the median value
 among the measurements collected by OpenRouter during the rolling 30-minute
 window. Provider labels and their values are colored; model names and other
 text stay white.
@@ -94,8 +94,7 @@ The default model list is ordered with Pro models first, then regular models:
 Add or remove model IDs in `models` as needed. Provider `tag` must match
 OpenRouter's endpoint tag, such as `openai` or `openai/fast`. `percentile` can
 be `p50`, `p75`, `p90`, or `p99`; the default is `p50`. The panel refreshes
-every ten minutes by default. Set `pollMs` to change it. The footer shows the
-last refresh as `upd HH:MM:SS`.
+every ten minutes by default. Model pages are requested sequentially with a one-second delay between requests; set pollMs and pageDelayMs to change these intervals.
 
 The active OpenRouter model in the current OpenCode session is also included
 automatically, even if it is not in the file.
