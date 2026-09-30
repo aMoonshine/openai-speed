@@ -7,9 +7,9 @@ const providerDisplayName = (label) => label === "OpenAI Fast" ? "Fast" : label;
 const isProModel = (modelId) => /-pro$/i.test(modelId);
 const MODEL_COLUMN_WIDTH = 14;
 const PROVIDER_COLUMN_WIDTH = 7;
-const PROVIDER_COLORS = ["#73aaa7", "#6f9878"];
+const PROVIDER_COLORS = ["#73aaa7", "#6f9878", "#a97fb0"];
 const PRO_MODEL_COLOR = "#e2a34e";
-const PRO_VALUE_COLORS = ["#8bcac2", "#91bd91"];
+const PRO_VALUE_COLORS = ["#8bcac2", "#91bd91", "#c79ccb"];
 const UPDATE_COLOR = "#a99bc4";
 
 const formatUpdatedTime = (timestamp) => {
@@ -46,9 +46,15 @@ export const renderSnapshot = (snapshot, config) => {
   ].join("\n");
 };
 
+// Text defaults to wrapMode "word", so a padded cell that is wider than the
+// sidebar wraps onto a second line and the row grows a blank line. Keep every
+// cell on one line and clip it instead.
 const textNode = (solid, value, color) => {
   const node = solid.createElement("text");
   solid.setProp(node, "fg", color);
+  solid.setProp(node, "wrapMode", "none");
+  solid.setProp(node, "truncate", true);
+  solid.setProp(node, "flexShrink", 0);
   solid.insert(node, value);
   return node;
 };
@@ -61,6 +67,7 @@ const renderRows = (solid, snapshot, config) => {
     if (result.error) return textNode(solid, `${shortModelName(result.modelId)}: error: ${result.error}`, "white");
     const row = solid.createElement("box");
     solid.setProp(row, "flexDirection", "row");
+    solid.setProp(row, "flexShrink", 0);
     const pro = isProModel(result.modelId);
     solid.insert(row, textNode(solid, shortModelName(result.modelId).padEnd(MODEL_COLUMN_WIDTH), pro ? PRO_MODEL_COLOR : "white"));
     config.providers.forEach((_, index) => {

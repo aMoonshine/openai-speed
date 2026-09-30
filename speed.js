@@ -4,23 +4,23 @@ import path from "node:path";
 
 const DEFAULT_CONFIG_PATH = path.join(os.homedir(), ".config", "opencode", "openrouter-speed.json");
 const DEFAULT_MODELS = [
+  "openai/gpt-6.1-sol-pro",
   "openai/gpt-6-astra-pro",
-  "openai/gpt-5.6-sol-pro",
-  "openai/gpt-5.6-terra-pro",
-  "openai/gpt-5.6-luna-pro",
+  "openai/gpt-6-sol-pro",
+  "openai/gpt-6-luna-pro",
+  "openai/gpt-6.1-sol",
   "openai/gpt-6-astra",
-  "openai/gpt-5.6-sol",
-  "openai/gpt-5.6-terra",
-  "openai/gpt-5.6-luna",
+  "openai/gpt-6-sol",
+  "openai/gpt-6-luna",
 ];
 const DEFAULT_PROVIDERS = [
   { label: "OpenAI", tag: "openai" },
   { label: "Fast", tag: "openai/fast" },
+  { label: "Flex", tag: "openai/flex" },
 ];
 const PERCENTILES = ["p50", "p75", "p90", "p99"];
 const DEFAULT_POLL_MS = 600000;
 const DEFAULT_PAGE_DELAY_MS = 1000;
-const lastSuccessfulProviders = new Map();
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -42,6 +42,7 @@ const parseProviders = (value) => {
     .map((provider) => ({
       label: nonEmptyString(provider.label),
       tag: nonEmptyString(provider.tag),
+      row: nonEmptyString(provider.row),
     }))
     .filter((provider) => provider.label && provider.tag);
   return providers.length > 0 ? providers : DEFAULT_PROVIDERS;
@@ -182,10 +183,36 @@ const fetchText = async (url) => {
   }
 };
 
-export const parsePageThroughput = (html, providers, percentile) => {
-  const normalized = html.replaceAll('\\\"', '"');
+// The model page renders provider rows as "OpenAI", "OpenAI Fast", "OpenAI Flex",
+// "Azure", with the Azure region only in the row's aria-label. Collapse to a bare
+// key so "openai/fast" matches "OpenAI    Fast" and "azure/eu" matches the EU row.
+const rowKey = (value) => (value ?? "").replace(/[^a-z0-9]/gi, "").toLowerCase();
+
+const providerRowKey = (provider) => rowKey(provider.row ?? provider.tag);
+
+const rowRegion = (row) => row.match(/aria-label="Region:\s*([A-Za-z]{2,3})\b[^"]*"/i)?.[1];
+
+const rowMetricsFromPage = (html) => {
+  const rows = [...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map((match) => match[1]);
   const metrics = new Map();
-  const pattern = /"provider_slug"\s*:\s*"([^"]+)"[\s\S]{0,12000}?"stats"\s*:\s*\{([^}]*)\}/g;
+  for (const row of rows) {
+    // OpenRouter uses the same aria-label for standard, Flex, and Fast rows, so the
+    // heading is the only reliable source for the provider name.
+    const heading = row.match(/<th\b[^>]*>([\s\S]*?)<\/th>/i)?.[1];
+    const name = heading ? heading.replace(/<[^>]*>/g, " ") : row.match(/aria-label="Open\s+([^"]+?)\s+details"/i)?.[1];
+    const throughput = row.match(/>([0-9]+(?:\.[0-9]+)?)<span[^>]*>\s*tps<\/span>/i)?.[1];
+    if (!name || throughput === undefined) continue;
+    const key = rowKey(`${name} ${rowRegion(row) ?? ""}`);
+    if (key && !metrics.has(key)) metrics.set(key, Number(throughput));
+  }
+  return metrics;
+};
+
+export const parsePageThroughput = (html, providers, percentile) => {
+  const normalized = html.replaceAll('\\"', '"');
+  const metrics = new Map();
+  // An endpoint may have no stats. Never cross into the next provider's stats.
+  const pattern = /"provider_slug"\s*:\s*"([^"]+)"(?:(?!"provider_slug"\s*:)[\s\S]){0,12000}?"stats"\s*:\s*\{([^}]*)\}/g;
   let match;
   while ((match = pattern.exec(normalized))) {
     const stats = Object.fromEntries(
@@ -197,17 +224,11 @@ export const parsePageThroughput = (html, providers, percentile) => {
     const throughput = pageStatsMetric(stats, percentile);
     if (throughput !== undefined && !metrics.has(match[1])) metrics.set(match[1], throughput);
   }
-  const rows = [...normalized.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)].map((match) => match[1]);
-  const rowMetrics = new Map();
-  for (const row of rows) {
-    const name = row.match(/aria-label="Open\s+([^"]+?)\s+details"/i)?.[1];
-    const throughput = row.match(/>([0-9]+(?:\.[0-9]+)?)<span[^>]*>\s*tps<\/span>/i)?.[1];
-    if (name && throughput !== undefined) rowMetrics.set(name.replace(/\s+/g, " ").trim().toLowerCase(), Number(throughput));
-  }
+  const rowMetrics = rowMetricsFromPage(normalized);
   return providers.map((provider) => ({
     label: provider.label,
     tag: provider.tag,
-    throughput: rowMetrics.get((provider.tag === "openai/fast" ? "OpenAI Fast" : provider.label).replace(/\s+/g, " ").trim().toLowerCase()) ?? metrics.get(provider.tag),
+    throughput: rowMetrics.get(providerRowKey(provider)) ?? metrics.get(provider.tag),
   }));
 };
 
@@ -229,17 +250,6 @@ const providerView = (endpoint, provider, percentile) => {
 
 const hasThroughput = (provider) => typeof provider?.throughput === "number" && Number.isFinite(provider.throughput);
 
-const rememberProviders = (modelId, providers) => {
-  const previous = lastSuccessfulProviders.get(modelId);
-  const merged = providers.map((provider, index) => ({
-    label: provider.label,
-    tag: provider.tag,
-    throughput: hasThroughput(provider) ? provider.throughput : previous?.[index]?.throughput,
-  }));
-  if (merged.some(hasThroughput)) lastSuccessfulProviders.set(modelId, merged);
-  return merged;
-};
-
 export const fetchModelSpeed = async (modelId, providers, percentile) => {
   const url = modelPath(modelId);
   if (!url) return { modelId, providers: [], error: "invalid model id" };
@@ -249,7 +259,7 @@ export const fetchModelSpeed = async (modelId, providers, percentile) => {
   try {
     pageProviders = await fetchPageThroughput(modelId, providers, percentile);
     if (pageProviders.every(hasThroughput)) {
-      return { modelId, providers: rememberProviders(modelId, pageProviders) };
+      return { modelId, providers: pageProviders };
     }
   } catch (error) {
     pageError = error instanceof Error ? error.message : "page request failed";
@@ -275,12 +285,9 @@ export const fetchModelSpeed = async (modelId, providers, percentile) => {
     throughput: pageProviders?.[index]?.throughput ?? apiProviders?.[index]?.throughput,
   }));
   if (mergedProviders.some(hasThroughput)) {
-    return { modelId, providers: rememberProviders(modelId, mergedProviders) };
+    return { modelId, providers: mergedProviders };
   }
 
-  if (lastSuccessfulProviders.has(modelId)) {
-    return { modelId, providers: rememberProviders(modelId, providers) };
-  }
   if (apiProviders) return { modelId, providers: apiProviders };
   return { modelId, providers: [], error: apiError ?? pageError };
 };
@@ -310,5 +317,6 @@ export const modelIdsFromSession = (session) => {
   const model = isRecord(session) && isRecord(session.model) ? session.model : undefined;
   if (!model || model.providerID !== "openrouter") return [];
   const modelId = normalizeModelId(model.modelID ?? model.id);
+  if (/^openai\/gpt-[\d.]+-terra(?:-pro)?$/i.test(modelId ?? "")) return [];
   return modelId ? [modelId] : [];
 };

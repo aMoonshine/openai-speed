@@ -82,22 +82,29 @@ Copy `config.example.json` to:
 
 The default model list is ordered with Pro models first, then regular models:
 
+- `openai/gpt-6.1-sol-pro`
 - `openai/gpt-6-astra-pro`
-- `openai/gpt-5.6-sol-pro`
-- `openai/gpt-5.6-terra-pro`
-- `openai/gpt-5.6-luna-pro`
+- `openai/gpt-6-sol-pro`
+- `openai/gpt-6-luna-pro`
+- `openai/gpt-6.1-sol`
 - `openai/gpt-6-astra`
-- `openai/gpt-5.6-sol`
-- `openai/gpt-5.6-terra`
-- `openai/gpt-5.6-luna`
+- `openai/gpt-6-sol`
+- `openai/gpt-6-luna`
 
 Add or remove model IDs in `models` as needed. Provider `tag` must match
-OpenRouter's endpoint tag, such as `openai` or `openai/fast`. `percentile` can
+OpenRouter's endpoint tag. For GPT-6 and GPT-6.1 Sol that is `openai`,
+`openai/fast`, or `openai/flex`. The tag is also used to locate the matching
+row on the OpenRouter model page, where the same three rows all share one
+`aria-label`. Set `row` to override the page row name when a tag does not
+translate directly, for example `{"label": "Azure US", "tag": "azure/us"}`.
+`percentile` can
 be `p50`, `p75`, `p90`, or `p99`; the default is `p50`. The panel refreshes
 every ten minutes by default. Model pages are requested sequentially with a one-second delay between requests; set pollMs and pageDelayMs to change these intervals.
 
 The active OpenRouter model in the current OpenCode session is also included
 automatically, even if it is not in the file.
+If OpenRouter has no recent measurement for a provider, its value is shown as
+`-` rather than retaining an older speed as though it were current.
 
 Use `/openai-speed` to force a refresh. Restart OpenCode after changing
 the config file or plugin registration.
